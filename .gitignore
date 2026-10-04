@@ -1,0 +1,57 @@
+# --- Secrets --------------------------------------------------------------
+# .env holds GROQ_API_KEY. Never commit it. .env.example documents the shape
+# without the value.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Python ---------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# --- Virtual environments -------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Test and type-checker caches -----------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+
+# --- Flask ----------------------------------------------------------------
+instance/
+.webassets-cache
+
+# --- Editors and OS ---------------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Runtime output ---------------------------------------------------------
+# audit_log.jsonl is deliberately NOT ignored. The README references specific
+# content_ids from it as the worked audit sample, so the committed file is the
+# evidence behind that section. A real deployment would ignore it: it is
+# append-only runtime data that grows without bound and carries creator_id and
+# verbatim appeal reasoning.
+*.log
+*.jsonl
+!audit_log.jsonl
