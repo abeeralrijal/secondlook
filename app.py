@@ -1,16 +1,21 @@
-"""ProvenanceGuard API. Milestone 3: submission endpoint and signal 1.
+"""ProvenanceGuard API.
 
-Not yet implemented, per planning.md section 11: the LLM judge, fusion and
-confidence scoring, label generation, appeals, and the audit log. Response
-fields that depend on those milestones are returned as null rather than
-omitted, so the shape stays stable against the section 6 contract.
+Endpoints: POST /submit, POST /appeal, GET /content/<id>, GET /log, GET /health.
+See planning.md section 6 for the full contract and section 8 for the flow.
 """
 
 import os
 from datetime import datetime, timezone
 
+from dotenv import load_dotenv
 from flask import Flask, jsonify, request
 from flask_limiter import Limiter
+
+# Loaded here rather than left to the caller so that `flask --app app run`
+# picks up GROQ_API_KEY. Without it the judge signal returns "failed" and
+# every result degrades to uncertain, which looks like a logic bug rather
+# than a missing key.
+load_dotenv()
 
 import config
 from appeals import GROUNDS, AppealStore

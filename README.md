@@ -1,14 +1,16 @@
 # ProvenanceGuard
 
-Attribution analysis for text-based creative content. A submission goes in, and a transparency label comes back that a non-technical reader can act on, along with the confidence behind it and an audit trail that survives a dispute.
+[Watch the demo video](https://drive.google.com/file/d/19uG8KHRHI4B18oZpcIs52dIeZpOJpuv8/view?usp=sharing)
 
-Design decisions and the reasoning behind them live in [planning.md](planning.md). This document covers what was built, what it does, and where it falls down.
+ProvenanceGuard analyzes text-based creative content and returns an attribution result, a confidence score, and a plain-language transparency label. It also keeps an audit log and lets creators appeal a result.
+
+The design is documented in [planning.md](planning.md). This README explains how the system works, how it was tested, and its limitations.
 
 ## Up front: what this system can and cannot do
 
 Text-only AI detection has a low accuracy ceiling. OpenAI withdrew its own classifier for insufficient accuracy, and no published detector is reliable enough to treat as authoritative on a single document. This is built as a graded advisory signal, not a verdict.
 
-Three consequences run through everything below. The `uncertain` band is wide on purpose. Confidence is reported separately from the classification rather than folded into it. Appeals are a first-class path, because the system will be wrong and the people it is wrong about need recourse that does not depend on the system agreeing with them.
+The system uses a wide `uncertain` band and reports confidence separately from the classification. Creators can appeal any result, since the checks can misclassify their work.
 
 ## Running it
 
@@ -107,7 +109,7 @@ Every error uses one envelope: `{"error": {"code", "message", "field?", "detail?
 
 ## Detection signals
 
-Two signals, chosen for **independent failure modes** rather than individual accuracy. That choice is the whole argument. Two accurate signals that fail on the same inputs give no more coverage than one; two mediocre signals that fail on different inputs catch each other.
+The system uses two signals that measure different properties of the text. Each has weaknesses, but combining structural measurements with an LLM assessment helps reveal cases where the checks disagree.
 
 ### Signal 1: stylometric variance
 
@@ -122,7 +124,7 @@ Local computation, no network. Four sub-metrics, each mapped to a 0 to 1 AI-like
 
 **Why this property.** The mechanism is regression to the mean, from two causes stacked. Autoregressive decoding draws from a distribution whose mass sits on high-probability continuations, so rare constructions appear less often than a human would produce them. Instruction tuning pushes the same way, optimizing toward prose rated clear and well organized, which in practice means even sentence lengths and explicit signposting. Human writing carries variance nobody decided on: sentences run long because the thought ran long, fragments land for rhythm, words repeat because the writer liked them.
 
-**Why I kept it despite being the weaker signal.** It is free, instant, deterministic, auditable sub-metric by sub-metric, and it works when the network is down. It is a cheap prior that fails differently from the judge, which is the only reason it earns a place.
+**Why I kept it despite being the weaker signal.** It is free, fast, deterministic, and works without a network connection. Its individual measurements are easy to inspect, and its weaknesses differ from those of the LLM judge.
 
 **What it misses.**
 
@@ -181,7 +183,7 @@ Where they diverged is more informative than the totals:
 | roughened AI | 0.23 | 0.55 | 0.320 | evasion fools the stylometer; the judge quoted the roughening itself as a pattern |
 | formal non-native | 0.59 | 0.60 | **0.005** | both wrong, agreeing almost exactly: the correlated failure |
 
-That last row is why the system has a formality damper.
+The formal non-native passage led to adding the formality damper.
 ## Confidence scoring
 
 ### Two numbers, not one
@@ -274,11 +276,51 @@ POST /submit   315 chars, the same kind of AI prose, much shorter
   VERDICT      uncertain  ->  "Not enough evidence to say"
 ```
 
-This pair is the design working. The likelihoods are **0.9041 and 0.8222**, a gap of 0.08, so both texts lean AI about equally hard. The confidences are **0.8748 and 0.5626**. The labels are different. A strong lean on thin evidence does not produce an accusation, because `sufficiency` collapsed from 0.977 to 0.195 and dragged confidence below the gate.
+Both examples lean toward AI, with likelihoods of **0.9041 and 0.8222**. Their confidence scores are **0.8748 and 0.5626**, so they receive different labels. The shorter text has less evidence: its `sufficiency` falls from 0.977 to 0.195, bringing confidence below the classification threshold.
+
+These examples have similar AI likelihoods, which makes it easier to see how confidence affects the label.
+
+### Confidence is not a constant
+
+Values recorded across the committed audit log and the live label run:
+
+| Confidence | Verdict | Length | Likelihood |
+|---|---|---|---|
+| 0.9537 | human | 989 | 0.0073 |
+| 0.9006 | human | 889 | 0.035 |
+| 0.8748 | ai | 1097 | 0.9041 |
+| 0.8513 | ai | 1097 | 0.8066 |
+| 0.5805 | uncertain | 564 | 0.6307 |
+| 0.5626 | uncertain | 315 | 0.8222 |
+| 0.5260 | uncertain | 293 | 0.2997 |
+
+Confidence varies by about 0.43 across these seven submissions. Rows 3 and 6 both lean toward AI but differ by about 0.31 in confidence. Rows 2 and 7 both lean toward human writing but differ by about 0.37. Text length and signal agreement help explain these differences, which is why the response includes both likelihood and confidence.
 
 ## Transparency label
 
 Four variants. Three are classification results; the fourth is reachable only through an appeal. Every string is static, with no interpolation, no numeric score, and no severity field.
+
+### Shape and trigger conditions
+
+Each label is three strings plus the variant id. `headline` is the title a reader sees, `body` explains the result, and `confidence_phrase` makes the confidence level meaningful without quoting a number.
+
+| Variant id | Triggered when | Severity for styling |
+|---|---|---|
+| `high_confidence_ai` | `ai_likelihood >= 0.70` and `confidence >= 0.75` | derive from `variant` |
+| `high_confidence_human` | `ai_likelihood <= 0.30` and `confidence >= 0.75` | derive from `variant` |
+| `uncertain` | neither gate clears | derive from `variant` |
+| `under_review` | an appeal is on file, overriding any verdict | derive from `variant` |
+
+The label object as returned by the API, rendered from `labels.py`:
+
+```json
+{
+  "variant": "high_confidence_ai",
+  "headline": "Likely AI-generated",
+  "body": "Two separate checks both found patterns typical of AI writing. One measured sentence rhythm, punctuation variety, and how often common transition phrases appear. The other read the text for the kind of phrasing and structure AI tends to produce.",
+  "confidence_phrase": "Both checks agreed, and there was enough text to analyze properly, so this result is a strong one. It is still an automated estimate rather than proof of how the text was made. The creator can contest it."
+}
+```
 
 ### Variant 1: high-confidence AI (`high_confidence_ai`)
 
@@ -313,6 +355,61 @@ Four variants. Three are classification results; the fourth is reachable only th
 > The automated result is on hold until that review is finished.
 
 This variant replaces whatever was shown before, including a high-confidence AI label. An unreviewed accusation should not keep standing while it is being disputed.
+
+### Mockup
+
+How the three result variants would read in a reader-facing panel beneath a piece of content. Optional, included for orientation; the written text above is authoritative.
+
+```
++--------------------------------------------------------------------+
+|  CONTENT PROVENANCE                                                |
+|                                                                    |
+|  Likely AI-generated                                               |
+|                                                                    |
+|  Two separate checks both found patterns typical of AI writing.    |
+|  One measured sentence rhythm, punctuation variety, and how        |
+|  often common transition phrases appear. The other read the        |
+|  text for the kind of phrasing and structure AI tends to produce.  |
+|                                                                    |
+|  Both checks agreed, and there was enough text to analyze          |
+|  properly, so this result is a strong one. It is still an          |
+|  automated estimate rather than proof of how the text was made.    |
+|  The creator can contest it.                                       |
+|                                                 [ Contest this ]   |
++--------------------------------------------------------------------+
+
++--------------------------------------------------------------------+
+|  CONTENT PROVENANCE                                                |
+|                                                                    |
+|  Likely written by a person                                        |
+|                                                                    |
+|  Two separate checks both found patterns typical of human          |
+|  writing, including natural variation in sentence length and the   |
+|  kind of specific detail writers draw from their own experience.   |
+|                                                                    |
+|  Both checks agreed, and there was enough text to analyze          |
+|  properly, so this result is a strong one. It is an automated      |
+|  estimate, and it does not rule out AI help with drafting or       |
+|  editing.                                                          |
+|                                                 [ Contest this ]   |
++--------------------------------------------------------------------+
+
++--------------------------------------------------------------------+
+|  CONTENT PROVENANCE                                                |
+|                                                                    |
+|  Not enough evidence to say                                        |
+|                                                                    |
+|  Our checks either disagreed with each other, or the text did      |
+|  not give them enough to work with, or the result was too close    |
+|  to call. The system could not reach a reliable conclusion.        |
+|                                                                    |
+|  No call is being made in either direction. Treat this as          |
+|  unknown, not as a reason for suspicion.                           |
+|                                                 [ Contest this ]   |
++--------------------------------------------------------------------+
+```
+
+No percentage, meter, or progress bar appears anywhere. A bar implies a measured quantity on a known scale, which is the same false-precision problem as the percentage. Confidence reaches the reader as a sentence or not at all.
 
 ### Three decisions behind the wording
 
@@ -495,6 +592,32 @@ A sonnet or villanelle. The spec predicted the stylometer would score verse near
 
 Verse is line-structured, not sentence-structured: 14 lines, 2 sentences. Sentence count falls below the measurability floor, so burstiness is reported *unavailable* rather than low, the heaviest sub-metric drops out entirely, and the signal's effective weight falls from 0.35 to 0.21. The verse false positive is real but lives in stanza uniformity, which scored 0.731 because a sonnet's stanzas are identical in length by definition of the form. It carries only weight 0.15, so it did not swing this case; a poem in regular quatrains with more sentence breaks would fire both.
 
+### Expository human writing, where the judge is the signal that fails
+
+The cases above are mostly the stylometer's fault. This one is the judge's, and it is the clearest demonstration that the two signals fail on different content.
+
+A passage of competent human academic prose:
+
+> "The relationship between monetary policy and asset price inflation has been extensively studied in the literature. Central banks face a fundamental tension between their mandate for price stability and the unintended consequences of prolonged low interest rates on equity and real estate valuations."
+
+Measured: **stylometric 0.000, judge 0.85.** The stylometer was right and the judge was wrong, and because the judge carries 0.65 weight it pulled the fused likelihood to 0.553, mid-scale, when the correct answer was clearly human.
+
+The cause is a property of the rubric, not a tuning problem. Two of its four categories, `hedging_symmetry` and `structural_signposting`, describe the discourse pattern of *good expository writing*: present the tension, give both sides, do not overclaim, signpost the structure. That is what a careful human writes when the subject is contested and the audience is unknown. The judge is detecting institutional register, and institutional register is produced both by preference tuning and by humans writing in institutions. The rubric cannot separate those two sources, because the feature genuinely is the same feature.
+
+Literature reviews, policy briefs, encyclopedia entries, grant applications, and legal summaries are all at elevated risk for this reason. The content types most likely to be flagged are the ones where hedged, balanced, well-signposted prose is the professional standard.
+
+A second failure compounds it in this specific passage. Two sentences, one paragraph, two punctuation marks, so three of four stylometric sub-metrics were unmeasurable and the signal scored **0.000 from discourse-marker density alone**. "Contains no transition words" became a maximally-human reading on one measurement. The signal correctly reduced its own weight to 0.0875 to reflect 25 percent coverage, and `fuse` ignored that and used the static 0.35, which is the spec contradiction described below.
+
+### The same submission can receive two different labels
+
+Not a content type, but a signal property with a direct user-facing consequence, so it belongs here.
+
+The judge is not deterministic despite `temperature=0`. Measured on one casual human passage: six calls returned 0.1 and a seventh returned 0.6. On the formal non-native passage: 0.60 in one pass and 0.00 in another. On the expository passage above: 0.80, 0.85, and 0.90 across three runs.
+
+The failure shape is a stable mode with rare excursions of roughly half the scale, which is worse than uniform noise because small-sample testing hides it. I was fooled by exactly this twice while building the system.
+
+The consequence: any submission whose confidence sits near the 0.75 verdict gate can be classified `uncertain` on one submission and `ai` on a resubmission of identical text. For a reader-facing transparency label that is a correctness problem, not just noise. Median-of-three sampling fixes it and was unaffordable at 1150 tokens a call against an 8000 token per minute ceiling.
+
 ### Hybrid authorship
 
 A human drafts, AI tightens. Or AI drafts, a human rewrites. The system returns `uncertain`, which is arguably right, but the real problem is upstream: **there is no true label**. "Was this AI or human" has no answer for this text, and three buckets cannot express "both." This is probably the most common real case and the one the system is least equipped to describe. A platform that cares about it needs a disclosure mechanism, not a better detector.
@@ -509,51 +632,91 @@ Below roughly 470 characters with moderate evidence, no verdict is reachable. Me
 
 ## Spec reflection
 
-### Where the spec helped
+### How the spec guided implementation: pre-registered worked examples
 
-**Pre-registered worked examples caught nothing, which is the point.** Section 2 of `planning.md` contains five fully tabulated cases, written before any fusion code existed. Turning them into tests meant I was checking the implementation against a specification rather than against itself. All five reproduced. Had I written the formula first and the examples after, I would have been testing that my code does what my code does.
+Section 2 of `planning.md` contains five fully tabulated cases, each with the signal inputs, all four confidence components, the resulting confidence, and the expected verdict. They were written before any fusion code existed, as part of specifying the confidence model rather than as a test plan.
 
-The same principle caught a real failure elsewhere. Section 11 pre-registered that judge spread above 0.15 would disqualify the 0.65 weight. When I measured 0.30, the threshold was already fixed and could not be rationalized after the fact. It forced a genuine decision rather than a shrug.
+When I built `fuse()`, I used those five cases as tests. All five matched within rounding. Having expected results in advance helped me check the implementation independently and catch differences from the spec.
 
-**Writing blind spots before building falsified a prediction.** Section 5 claimed verse would score near 1.0 on burstiness. The implementation returned 0.18 and showed the mechanism was entirely different. Without a written prediction there would have been nothing to be wrong about.
+The worked examples also exposed a gap in the spec. Writing out worked example 5, the degraded single-signal case, exposed that section 2 defined `agreement` as `1 - abs(s1 - s2)` and never said what that means with one signal. The tabulated confidence of 0.51 is reproduced only by treating a lone signal as agreeing with itself. Without the worked example I would have picked a value silently; with it, the gap was visible and is now a named constant with a comment explaining the choice.
 
-### Where implementation diverged, and why
+**Additional instance.** Section 11 pre-registered that judge score spread above 0.15 would disqualify the 0.65 weight. When I measured 0.30, the threshold was already fixed and could not be rationalized after the fact, so it forced a genuine decision rather than a shrug. I ended up keeping 0.65 on different evidence, head-to-head accuracy of 9 of 10 against the stylometer's 7, and the stability result is documented as a blind spot rather than quietly dropped.
 
-**The spec contained a contradiction I only found by building it.** Section 1 says a signal's weight is "reduced on partial failure." The same section gives the combination formula as `0.35 * s1 + 0.65 * s2`, using fixed constants. I implemented both. `stylometric_signal` reduces its weight in proportion to measured coverage, and `fuse` then ignores that and uses the static 0.35. A 299-character passage measured one sub-metric of four, scored 0.000, self-reduced to weight 0.0875, and entered fusion at 0.35 anyway.
+### How implementation diverged: removing `503 ALL_SIGNALS_FAILED`
 
-Both halves are spec-compliant and they contradict each other. I left the divergence in place rather than silently changing the fusion formula, because quietly "fixing" a spec mismatch is how an implementation drifts away from its own documentation. It is recorded as an open decision.
+Section 6 defined a `503 ALL_SIGNALS_FAILED` response for the case where neither signal returns a usable score. I implemented it as written. A 63-character submission then showed it was wrong.
 
-**A second divergence I did make deliberately: removing `503 ALL_SIGNALS_FAILED`.** The spec defined it, and I implemented it, and then a 63-character submission showed it was wrong. Section 2 states that `uncertain` is a valid classification result rather than an error, and the section 3 `uncertain` label says in so many words that the text did not give the checks enough to work with. Returning a server error for exactly that case contradicted both. The endpoint now returns 200 with `uncertain` and confidence 0.0. Here the spec disagreed with itself and I resolved it in favour of the two sections that were load-bearing for user-facing behaviour.
+On text that short, all four stylometric sub-metrics are unmeasurable, so the signal returns `failed`. If the judge is also unavailable, nothing scored, and the endpoint returned a server error.
 
-**Three constants moved because reality disagreed with them.** `MIN_TEXT_CHARS` went 200 to 120 to 50 as successively shorter real test cases were rejected by a floor that was doing a job `sufficiency` already did better. The submission rate limit went 10 to 6 to 10, the detour being a mistake: I had conflated "how much traffic does a writer generate" with "how much can the upstream provider serve."
+That contradicted two other parts of the same spec. Section 2 states plainly that `uncertain` is a valid classification result rather than an error condition. The section 3 `uncertain` label says, in the text a reader actually sees, that "the text did not give them enough to work with." A 63-character submission is precisely that case. The system had looked and could not say, which is an answer, and answering it with a `503` tells the caller the server is broken when the server is fine.
+
+I removed the error path. `POST /submit` now returns `200` with verdict `uncertain` and confidence `0.0`, and `signals[].status` still distinguishes thin text from an upstream outage, so nothing diagnostic is lost.
+
+I made this change because the error response conflicted with the uncertainty rules and label text. Returning an uncertain result made the endpoint consistent with those sections.
+
+### The divergence I declined to make
+
+Another inconsistency remains in the signal weights.
+
+Section 1 says a signal's weight is "reduced on partial failure." The same section gives the combination formula as `0.35 * s1 + 0.65 * s2`, with fixed constants. I implemented both. `stylometric_signal` reduces its weight in proportion to measured coverage, and `fuse` then ignores that and uses the static 0.35. A 299-character passage measured one sub-metric of four, scored 0.000, self-reduced to weight 0.0875, and entered fusion at 0.35 regardless.
+
+Both halves are spec-compliant and they contradict each other. Unlike the `503` case, neither side is load-bearing for anything a reader sees, and changing the fusion formula would alter every confidence value in the system including the five worked examples. Quietly rewriting a formula because the code felt wrong is how an implementation drifts away from its own documentation, which is the failure the pre-registered examples exist to prevent. I left it in place and recorded it as an open decision for a human to settle.
+
+### Constants that moved because measurement disagreed with them
+
+`MIN_TEXT_CHARS` went 200 to 120 to 50, as successively shorter real test cases were rejected by a floor doing a job `sufficiency` already did better. I also decoupled the validation floor from the sufficiency ramp, which had been sharing a constant; they answer different questions, and separating them is what let the floor drop without breaking the worked examples.
+
+The submission rate limit went 10 to 6 and back to 10. The detour was a mistake rather than a refinement: I had conflated "how much traffic does a legitimate writer generate" with "how much can the upstream provider serve," and matching the endpoint limit to Groq's free-tier quota penalised writers for a billing constraint.
 
 ## AI usage
 
-I used Claude (via Claude Code) as the implementing tool throughout, working from `planning.md` sections pasted verbatim. The prompts are committed in `prompts/m3.md`, `prompts/m4.md`, and `prompts/m5.md`. Four instances where my review changed the output:
+I used an AI coding assistant as the implementing tool throughout, working from `planning.md` sections pasted in verbatim rather than paraphrased, because the formulas carry specific constants and a paraphrase loses them. The prompts I sent are committed in `prompts/m3.md`, `prompts/m4.md`, and `prompts/m5.md`.
 
-### 1. Directed it to flag missing spec values rather than invent them
+Here are four examples of changes made during review.
 
-Section 1 gave an explicit ramp formula for burstiness only, and said the other three sub-metrics used "a clamped linear ramp between two anchor values" without saying which. The M3 prompt included: *"Flag, do not invent: if anchors for the other three sub-metrics are missing, name them in `config.py` as `UNCALIBRATED` and list them in your response rather than quietly choosing values."*
+### 1. Stylometric signal: adding partial-failure handling
 
-Without that instruction the obvious failure mode is plausible-looking constants silently becoming the specification. Six of the eight anchor values in `config.py` now carry an `UNCALIBRATED` comment saying they have no empirical basis.
+**What I directed.** Generate `stylometric_signal(text) -> dict` returning the uniform signal shape from section 1, with all four sub-scores exposed. Two explicit constraints: guard the coefficient of variation, since `stdev / mean` divides by zero on empty input and `stdev` is undefined for one sentence; and flag rather than invent, because section 1 specifies a ramp formula only for burstiness, so any anchors I had not given were to be marked `UNCALIBRATED` and listed back to me instead of quietly chosen.
 
-### 2. Overrode a rubric category I had specified wrong
+**What it produced.** A working signal with both guards in place and six of eight anchors marked `UNCALIBRATED` in `config.py`, which is the instruction being followed. But the returned `weight` was always the static `0.35`, even when three of four sub-metrics were unmeasurable.
 
-I defined `indexical_specificity` as "detail only a participant would have: ABSENT = more AI-like" and asked the judge for a verbatim supporting quote. The category then fired on all four calibration inputs, and on a casual human passage it cited **"the broth was fine but they put WAY too much sodium"** as evidence of *missing* specificity. That is the most specific phrase in the text.
+**What I revised.** Section 1's shape comment reads `// static per signal, reduced on partial failure`, and that clause had not been implemented. I added proportional reduction by measured coverage. A sonnet, where burstiness is unmeasurable because the poem is 14 lines and 2 sentences, now reports weight `0.21` instead of `0.35`. Without this, a score built from 60 percent of the intended basis would have carried full weight into fusion.
 
-The bug was mine, not the model's. **You cannot quote an absence.** So the model quoted something, and my hallucination guard passed it because the words really were in the text. A guard against fabricated quotes gives no protection against a fabricated inference about a real quote.
+### 2. LLM judge: correcting the specificity rubric
 
-I rewrote the category to fire only on absence, to explicitly not fire on informal lived specifics like a dish or a sensation, and to quote the vaguest stand-in phrase. The passage went from 0.60 to a stable 0.10 across six runs, and the category fired zero times.
+**What I directed.** Implement the four-category rubric from section 1 verbatim, with the submitted text in a delimited block marked as data, and require a verbatim supporting quote for every category fired.
 
-### 3. Rejected a dead-code weight reduction and a wrong error semantic
+**What it produced.** A judge that fired `indexical_specificity` on all four calibration inputs, making it non-discriminating. On a casual human passage it cited **"the broth was fine but they put WAY too much sodium"** as evidence of *missing* specificity. That is the most specific phrase in the text. The passage scored 0.60, and because the judge carries 0.65 weight it pulled the fused likelihood to 0.462 on obviously human writing.
 
-Two things I had the tool implement that I later judged wrong on review, both described in the spec reflection above: the weight reduction that nothing consumes, and the `503` that contradicted two other sections. The first I left and documented, because changing the fusion formula would have been exactly the silent divergence I had warned against in the M4 prompt. The second I removed, because the spec disagreed with itself and user-facing behaviour won.
+**What I revised.** The bug was in my spec, not its implementation. I had defined the category as "detail only a participant would have: ABSENT is more AI-like" and then demanded a quote. The model could not directly quote missing detail, so it cited a specific phrase instead. Quote verification passed because the words were in the text, even though the interpretation was wrong. This showed that checking quotes alone was not enough.
 
-### 4. Corrected my own premature conclusions twice
+I rewrote the category to fire only on absence, to explicitly not fire on informal lived specifics such as a dish or a sensation, and to quote the vaguest stand-in phrase that should have carried detail. The passage moved from 0.60 to a stable 0.10 across six runs, and the category fired in 0 of 6.
 
-After fixing the rubric, a single call showed 0.1 and I reported the fix as confirmed. The next full run showed 0.6 and I reported it as not working. Both were wrong: six paced calls showed 0.1 six times, with the 0.6 an outlier. One sample is not evidence in either direction, and the right characterization was a stable mode with rare half-scale excursions, which is in the limitations above.
+### 3. Fusion: revising the no-signal response
 
-Separately, I twice reported a feature as broken when a stale Flask process from an earlier step was still bound to port 5000 and serving old code. The lesson that went into the workflow: verify which process is answering before concluding the code is wrong.
+**What I directed.** Implement section 2 exactly rather than approximately, with every constant named in `config.py` and, as I phrased it in the prompt, "no numeric literal in `fusion.py`". I told it the five worked examples were the pre-written test and not to adjust the formula to make a case pass, and to flag two gaps I knew about rather than resolve them silently.
+
+**What it produced.** Fusion reproducing all five worked examples within rounding, both gaps flagged as asked, and `503 ALL_SIGNALS_FAILED` on the no-signal path exactly as section 6 of my spec defined it.
+
+It did not literally honour "no numeric literal", and it was right not to. `fusion.py` still contains `1.0 - abs(s1 - s2)`, `2.0 * abs(likelihood - 0.5)`, the `_clamp` bounds, and `round(x, 4)`. Those are not tunables, they are the definitions of agreement and extremity, and moving them to config would have made the formula unreadable while implying they were adjustable. My instruction was too broad; what I actually wanted was no tunable threshold or weight in `fusion.py`, and that does hold. I accepted the literals and did not ask for a second pass.
+
+**What I revised.** The `503` was faithful to the spec and wrong. A 63-character submission defeats all four stylometric sub-metrics, so with the judge also unavailable the endpoint returned a server error for text it had simply looked at and could not judge. That contradicted section 2, which says `uncertain` is a valid result rather than an error, and the section 3 label text, which tells the reader the checks did not have enough to work with. I removed the error path; it now returns `200` with `uncertain` and confidence `0.0`. This required changing the specification as well as the code.
+
+### 4. Rate limiting: a silently missing response header
+
+**What I directed.** Apply `flask-limiter` to `POST /submit` at the documented limit, bucketed by API key with an IP fallback, and return the `Retry-After` header that section 6 requires on a 429.
+
+**What it produced.** A limiter that correctly returned 429 past the limit and read `exc.retry_after` to populate the header. The code looked right.
+
+**What I revised.** `retry_after` is always `None` unless `RATELIMIT_HEADERS_ENABLED` is set, so the header was silently absent on every 429 while the limiting itself worked. A test checking for the header caught the missing configuration.
+
+### Process notes
+
+Two debugging mistakes changed how I checked later results.
+
+**I twice drew a conclusion from one sample.** After fixing the rubric in instance 2, a single call returned 0.10 and I treated the fix as confirmed. The next full run returned 0.60 and I treated it as broken. Both readings were wrong. Six paced calls showed 0.10 six times with the 0.60 an outlier, and the correct characterisation is a stable mode with rare half-scale excursions, which is now in the limitations section. This showed why a single run was not enough to judge whether the change worked.
+
+**I twice blamed code for a stale process.** A Flask server from an earlier step stayed bound to port 5000 and kept serving old code, and I reported a working feature as broken. Checking which process is answering now comes before concluding the code is wrong.
 
 ## What I would change before deploying this
 
